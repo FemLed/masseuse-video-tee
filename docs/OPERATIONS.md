@@ -53,7 +53,7 @@ repository. Its step summary prints the `terraform.tfvars` and `tee_policy`
 lines for the roll; the digest is identical on ghcr.io and in Artifact
 Registry (`VERIFY.md`, "How the image is built").
 
-`./build.sh` runs the same two builds locally, without a push (gzip layers,
+`bash build.sh` runs the same two builds locally, without a push (gzip layers,
 so a different digest), for iterating on the tree.
 
 Put the digest into `terraform.tfvars` (`container_image` and

@@ -155,6 +155,9 @@ jobs:
       image: ${{ needs.image.outputs.image }}
       digest: ${{ needs.image.outputs.digest }}
       registry-username: ${{ github.actor }}
+      # The provenance goes to the public transparency log whatever the
+      # repository's visibility; the repository name in it is not a secret.
+      private-repository: true
     secrets:
       registry-password: ${{ secrets.GITHUB_TOKEN }}
 

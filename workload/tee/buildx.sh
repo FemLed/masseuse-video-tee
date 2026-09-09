@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sourced by .github/workflows/release.yml and by ./build.sh: the buildx
+# Sourced by .github/workflows/release.yml and by bash build.sh: the buildx
 # invocations that produce the enclave image, in one place, so the release
 # and a local build push (or load) the same bytes for the same tree.
 #
@@ -7,7 +7,7 @@
 # docker-container driver docker/setup-buildx-action creates), and every
 # image is pushed as one OCI manifest whose layers are all one compression -
 # zstd for the enclave, whose launcher pulls and unpacks the image on every
-# boot (docs/OPERATIONS.md "Boot time"). Locally, ./build.sh uses the
+# boot (docs/OPERATIONS.md "Boot time"). Locally, bash build.sh uses the
 # daemon's own builder ("default"), which can see the images it just built.
 #
 # The caller names the builder in BUILDX_BUILDER.
@@ -33,7 +33,7 @@ buildx_image() {
 
 # buildx_local <image ref> <buildx build args...>: the same build without a
 # registry, loaded into the local daemon (gzip; zstd layers need a registry
-# push), for ./build.sh.
+# push), for bash build.sh.
 buildx_local() {
     local image=$1
     shift

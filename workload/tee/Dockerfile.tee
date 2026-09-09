@@ -15,7 +15,7 @@
 #
 # Build: .github/workflows/release.yml on a tag (both images, the smoke
 # test, signatures, provenance, promotion into Artifact Registry); locally,
-# ./build.sh at the repository root runs the same two builds without a
+# bash build.sh at the repository root runs the same two builds without a
 # push. The gateway tag and checksum come from camlink.lock.
 #
 # Launch policy (the labels Confidential Space reads):
@@ -38,7 +38,7 @@
 #                            launcher/spec/launch_policy.go); anything else
 #                            and the launcher refuses the image.
 # The base image (workload/Dockerfile), by digest in the release workflow;
-# the default is what ./build.sh tags locally.
+# the default is what bash build.sh tags locally.
 ARG BASE=masseuse-video-tee-base:local
 # bluenviron/mediamtx v1.20.1 (2026-08-18); the WebRTC keys in
 # mediamtx.tee.yml are this version's.
