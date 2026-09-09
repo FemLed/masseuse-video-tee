@@ -56,6 +56,36 @@ jobs:
           terraform init -backend=false -input=false
           terraform validate -no-color
 
+  workload:
+    # The pixel path and the producer shell, CPU only: the tests stub torch
+    # where a model would run, so what is exercised is the decode geometry,
+    # person selection, keypoint bookkeeping, motion descriptors, overlay,
+    # relay proxy, boot helpers and the analysis socket client.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: false
+      - name: pytest
+        working-directory: workload
+        run: |
+          uv run --python 3.12 \
+            --with pytest,pytest-timeout,numpy,opencv-python-headless,scipy,pyyaml,cryptography,pillow \
+            pytest -q --timeout 180 tests
+      - name: dockerfiles copy what the tree has
+        # Every COPY source in both Dockerfiles exists in the tree and is
+        # inside the .dockerignore allow-list.
+        run: |
+          for f in workload/Dockerfile workload/tee/Dockerfile.tee; do
+            sed -n 's/^COPY \([^-][^ ]*\) .*/\1/p' "$f" | while read -r src; do
+              test -e "$src" || { echo "$f copies $src, which does not exist" >&2; exit 1; }
+              case "$src" in workload/*|analysis.lock|camlink.lock) ;; *) echo "$f copies $src, outside .dockerignore's allow-list" >&2; exit 1;; esac
+            done
+          done
+
   shell:
     runs-on: ubuntu-latest
     steps:
@@ -63,4 +93,9 @@ jobs:
         with:
           persist-credentials: false
       - name: shellcheck
-        run: shellcheck -S warning tools/*.sh
+        run: shellcheck -S warning tools/*.sh build.sh workload/tee/buildx.sh workload/tee/entrypoint.sh
+      - name: locks
+        run: |
+          . ./camlink.lock
+          [[ "$CAMLINK_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] && [[ "$CAMLINK_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          grep -Eq '^version=' analysis.lock && grep -Eq '^object=analysis/' analysis.lock && grep -Eq '^sha256=[0-9a-f]{64}$' analysis.lock

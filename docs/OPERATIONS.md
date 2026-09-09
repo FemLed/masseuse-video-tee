@@ -33,16 +33,35 @@ hostname.
 
 ## 2. The image
 
-The workload (`workload/`) and its build are landing in this repository;
-from then on every image is built by GitHub Actions from a tagged commit,
-signed and attested, and promoted by digest into this project's Artifact
-Registry (`VERIFY.md`, "How the image is built"). The digest to pin is the
-one the release names.
+Every image is built by `.github/workflows/release.yml` from a tag:
+
+```sh
+git tag vX.Y.Z && git push origin vX.Y.Z   # through the release identity
+```
+
+The workflow builds the base (`workload/Dockerfile`) and the TEE layer
+(`workload/tee/Dockerfile.tee`) with BuildKit, every layer zstd, one OCI
+manifest per image, pushes them to `ghcr.io/femled/masseuse-video-tee`
+(and `-base`), runs the smoke test on the pushed image, signs it keyless,
+attaches SLSA provenance (the container generator, an isolated job), and
+then promotes: `crane copy` by digest into this project's Artifact Registry
+and `cosign sign --key gcpkms://...` with the key in `signing.tf`, in the
+layout the launcher reads. The promote job authenticates as the
+`github-release` service account through the GitHub OIDC pool in
+`terraform/github-release.tf`, which admits only tag refs of this
+repository. Its step summary prints the `terraform.tfvars` and `tee_policy`
+lines for the roll; the digest is identical on ghcr.io and in Artifact
+Registry (`VERIFY.md`, "How the image is built").
+
+`./build.sh` runs the same two builds locally, without a push (gzip layers,
+so a different digest), for iterating on the tree.
 
 Put the digest into `terraform.tfvars` (`container_image` and
-`container_image_digest`) and into the trainer's `tee_policy`. While rolling
-from one digest to another, list the new one in `candidate_image_digests`
-first so its VM can read the weights on its first boot.
+`container_image_digest`) and into the trainer's `tee_policy`
+(`allowed_image_digests`, and `image_sources` with the tag so the policy
+says where it was built). While rolling from one digest to another, list
+the new one in `candidate_image_digests` first so its VM can read the
+weights on its first boot.
 
 ## 3. The weights
 
@@ -274,10 +293,14 @@ Every image digest is signed with the project's Cloud KMS key
 (`masseuse-video-tee-cosign/image-signer`, `EC_SIGN_P256_SHA256`,
 `prevent_destroy`), through `cosign sign --key gcpkms://...` with the two
 annotations Confidential Space requires (`dev.cosignproject.cosign/sigalg`,
-`dev.cosignproject.cosign/pub`), no Rekor upload. Only the build identity
-holds `cloudkms.signerVerifier` on the key. The signature is a tag on the
-image's own repository (`.../masseuse-video-tee:sha256-<digest>.sig`),
-which is therefore what `tee-signed-image-repos` names.
+`dev.cosignproject.cosign/pub`), no Rekor upload. Only the release
+workflow's identity (`github-release`, `terraform/github-release.tf`)
+holds `cloudkms.signerVerifier` on the key, and it can only be assumed by a
+tag build of this repository. The signature is a tag on the image's own
+repository (`.../masseuse-video-tee:sha256-<digest>.sig`), which is
+therefore what `tee-signed-image-repos` names. cosign 2.x writes that
+layout; the keyless signature on ghcr.io is cosign 3's bundle format, which
+the launcher does not read and does not need.
 
 The key's fingerprint (hex sha256 over the DER public key, which is what a
 token reports in `submods.container.image_signatures[].key_id`) is

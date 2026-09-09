@@ -39,9 +39,18 @@ attested image says which one is running. The numbers, never frames, are
 what leaves the enclave, over TLS to the trainer's address that is itself
 part of the attestation.
 
-The workload source (`workload/`) is being moved into this repository from
-a private tree; until it lands, `VERIFY.md` says which published images
-were built from it and how.
+All of that is `workload/`: `pixel/` is the decode geometry, person
+detection, keypoint detection and motion descriptors; `producer/` is the
+session shell that runs them, draws the overlay and speaks to the analysis
+module over a local socket; `tee/` is the container image and its
+entrypoint. `analysis/protocol.md` names every field that crosses to the
+analysis module and every field that comes back.
+
+Every published image is built from a tagged commit of this repository by
+its release workflow (`.github/workflows/release.yml`) on GitHub Actions,
+with SLSA provenance and a keyless signature, and the digest the enclave
+attests is the digest that workflow built. `VERIFY.md` says how to check
+that for the digest your session attested, and which digests are current.
 
 ## Trust boundary
 
@@ -111,11 +120,19 @@ check that should hold and does not.
 
 | Path | What |
 | --- | --- |
-| `terraform/` | The project: service account, Workload Identity Federation pool and providers keyed to the attestation, models bucket, Artifact Registry, static IP, firewall, the slot VM(s), the trainer's start/stop role, the KMS signing key, the sweeper, VPC Service Controls (off until the project has an organization) |
+| `workload/pixel/` | Everything that reads frames: decode geometry and stream handling (`live_pose.py`), RT-DETRv4 person detection (`vendor/rtdetrv4/`, `pose_track.py`), Sapiens2-1B keypoints (`pose_rows.py`, `keypoints.py`), regional motion descriptors (`motion.py`) |
+| `workload/producer/` | The session shell (`producer.py`), the overlay drawn back to the phone, the WHIP/WHEP relay proxy with the capability and evidence checks, the external-camera and connector ingest, the enclave's boot helpers (attestation, ACME, weights and analysis bundle fetch), the socket client to the analysis module |
+| `workload/tee/` | The image: `Dockerfile` (base: Python, torch, ffmpeg), `Dockerfile.tee` (MediaMTX, Caddy, the connector gateway, the launch policy), `entrypoint.sh`, `Caddyfile`, `mediamtx.tee.yml` |
+| `workload/tests/` | The workload's tests, CPU only |
+| `analysis/protocol.md` | What crosses the socket to the analysis module and what comes back |
+| `analysis.lock` | The analysis bundle (version and SHA-256) the image will run; copied into the image |
+| `camlink.lock` | The `masseuse-camlink-gateway` release (tag and checksum) the image carries |
+| `.github/workflows/release.yml` | The build: images to `ghcr.io`, SLSA provenance, keyless signature, promotion by digest into the enclave's registry, KMS signature |
+| `terraform/` | The project: service account, Workload Identity Federation pool and providers keyed to the attestation, models bucket, Artifact Registry, static IP, firewall, the slot VM(s), the trainer's start/stop role, the KMS signing key, the release workflow's identity, the sweeper, VPC Service Controls (off until the project has an organization) |
 | `verifier/` | `tee-verify`, the standalone attestation checker |
 | `tools/` | `gts-acme-test.sh`: the rig that established Google Trust Services tolerates a fresh certificate on every boot |
-| `camlink.lock` | The `masseuse-camlink-gateway` release (tag and checksum) the image carries |
-| `VERIFY.md` | How to verify a slot; published digests; signing key |
+| `build.sh` | The same two image builds, locally, without a push |
+| `VERIFY.md` | How to verify a slot and the source of its image; published digests; signing key |
 | `docs/OPERATIONS.md` | Running it: infrastructure, build, boot, the on-demand lifecycle, signing, the sweeper, certificates |
 
 ## How it runs
