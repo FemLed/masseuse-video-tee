@@ -123,11 +123,20 @@ and carrying no provenance: `sha256:efe3d2b7…`, `sha256:3c3fa7f0…`,
 `sha256:80df7800…`, `sha256:c95761f4…`, `sha256:4866753a…`,
 `sha256:e7c80084…`.
 
-Production digests are appended here with the flip to the production
-Confidential Space image (`debug_mode = false`, `require_signed_image =
-true`); a digest is removed when its image is retired, and the trainer's
-policy (`/api/tee-policy`) mirrors this list, with `imageSources` naming
-the release tag each digest was built from.
+Production posture since 2026-09-09 22:20 UTC: the slot boots the STABLE
+`confidential-space` image with debugging disabled since boot
+(`debug_mode = false`; `cs.dbgstat` = `disabled-since-boot`,
+`cs.support_attributes` = `[LATEST STABLE USABLE]`), the trainer's policy
+refuses a debug image (`allowDebug: false`, `requireStable: true`), and the
+container's output is not redirected anywhere (`tee.launch_policy.log_redirect`
+= `debugonly`): what the enclave does is observable only through the
+attestation, the readings and this repository. `tee-verify` without
+`-allow-debug`, with `-cosign`, passed all 22 checks against the pinned slot
+at 22:20 UTC on `v0.2.3`, and a phone session at 22:22 UTC attested
+`dbgstat=disabled-since-boot` on the same digest. A digest is removed here
+when its image is retired, and the trainer's policy (`/api/tee-policy`)
+mirrors this list, with `imageSources` naming the release tag each digest
+was built from.
 
 ## How the image is built
 
