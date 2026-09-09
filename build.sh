@@ -4,8 +4,8 @@
 # the TEE layer (workload/tee/Dockerfile.tee) into the local Docker daemon,
 # then the smoke test (workload/tee/buildx.sh) on the result.
 #
-#   ./build.sh                 # both images and the smoke test (~25 min, ~20 GB)
-#   SMOKE=0 ./build.sh         # skip the smoke test
+#   bash build.sh                 # both images and the smoke test (~25 min, ~20 GB)
+#   SMOKE=0 bash build.sh         # skip the smoke test
 #
 # Published digests are never built here: they come from the release
 # workflow on a tag, with SLSA provenance and signatures, and are promoted
