@@ -178,7 +178,7 @@ report a check that should hold and does not.
 | `analysis.lock` | The analysis bundle (version and SHA-256) the image will run; copied into the image |
 | `camlink.lock` | The `masseuse-camlink-gateway` release (tag and checksum) the image carries |
 | `.github/workflows/release.yml` | The build: images to `ghcr.io` stamped with the tag and commit, SLSA provenance, keyless signature, promotion by digest into the enclave's registry, KMS signature, the GitHub Release that records the digest |
-| `terraform/` | The project: service account, Workload Identity Federation pool and providers keyed to the attestation, models bucket, Artifact Registry, static IP, firewall, the slot VM(s), the masseuse's start/stop role, the KMS signing key, the release workflow's identity, the sweeper, VPC Service Controls (off until the project has an organization) |
+| `terraform/` | The project: service account, Workload Identity Federation pool and providers keyed to the attestation, models bucket, Artifact Registry, a subnet per region and a static IP per slot, firewall, the slot VMs spread over `slot_zones` (even slots in us-central1-a, odd in us-east5-a), the masseuse's start/stop role, the KMS signing key, the release workflow's identity, the sweeper, VPC Service Controls (off until the project has an organization) |
 | `verifier/` | `tee-verify`, the standalone attestation checker |
 | `tools/` | `gts-acme-test.sh`: the rig that established Google Trust Services tolerates a fresh certificate on every boot |
 | `build.sh` | The same two image builds, locally, without a push |
