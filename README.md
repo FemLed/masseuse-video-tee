@@ -36,16 +36,16 @@ Inside the enclave, in code that is in this repository:
   and set aside) along with its level and pitch. No speech recognition or
   transcription runs; nothing identifies the voice.
 - Frames and audio are then discarded. Nothing is written to disk; the VM
-  has no persistent storage and no operator can read its memory.
+  has no persistent storage and nobody at masseuse.ai can read its memory.
 
 The keypoints, descriptors and vocalization labels, which identify nobody,
 go to an analysis module that turns them into a few numbers per second for
-the trainer (the masseuse.ai service on Cloud Run). The analysis module
+the masseuse (the masseuse.ai service on Cloud Run). The analysis module
 runs inside the same enclave as a separate process, receives no frames and
 no audio, and its logic is not published; its exact version is pinned by
 hash in this repository so the attested image says which one is running.
 The numbers, never frames or sound, are what leaves the enclave, over TLS to
-the trainer's address that is itself part of the attestation.
+the masseuse's address that is itself part of the attestation.
 
 All of that is `workload/`: `pixel/` is the decode geometry, person
 detection, keypoint detection and motion descriptors; `audio/` is the audio
@@ -69,24 +69,25 @@ record of each release is on its GitHub Release.
 
 - Cloudflare fronts `masseuse.ai` (HTML/JS, session API) but never carries
   SDP, media or the media capability, only the capability's SHA-256.
-- The trainer (Cloud Run, operator-run) orchestrates leases and receives the
-  readings. It does not proxy WHIP/WHEP for enclave slots.
+- The masseuse (Cloud Run, run by masseuse.ai) orchestrates leases and
+  receives the readings. It does not proxy WHIP/WHEP for enclave slots.
 - coturn is a TURN fallback the phone may use; it relays SRTP ciphertext.
-- The operator (the Google Cloud project owner) cannot read enclave memory,
-  SSH into the production image, redirect its logs, run an image the release
-  workflow did not build and sign from a tag of this repository, or obtain
-  the DTLS keys or the capability.
+- masseuse.ai itself, meaning any employee, contractor or administrator
+  working on its behalf, including the owners of the Google Cloud project,
+  cannot read enclave memory, SSH into the production image, redirect its
+  logs, run an image the release workflow did not build and sign from a tag
+  of this repository, or obtain the DTLS keys or the capability.
 - Residual: the JavaScript bundle and the policy (which signing key and
-  minimum release the clients accept) are operator-served. The provenance
-  on every release, this verifier, and the connector (which runs the checks
-  itself, outside the browser) are the mitigations.
+  minimum release the clients accept) are served by masseuse.ai. The
+  provenance on every release, this verifier, and the connector (which runs
+  the checks itself, outside the browser) are the mitigations.
 
 The two kinds of external camera keep the same boundary:
 
 - **A camera the user names (RTSPS, reachable from the internet).** The phone
   hands the enclave an `rtsps://` link (`PUT /ingest/source`, capability
   bearer, only after the phone has verified the attestation). The link is a
-  credential and stays in the enclave: the trainer and Cloudflare learn only
+  credential and stays in the enclave: the masseuse and Cloudflare learn only
   `source: external`, the enclave never logs it, nothing of it persists. The
   enclave probes the camera once for reachability and its certificate's
   SHA-256, then MediaMTX pulls RTSPS with that fingerprint pinned. Plain
@@ -143,7 +144,7 @@ report a check that should hold and does not.
 | `analysis.lock` | The analysis bundle (version and SHA-256) the image will run; copied into the image |
 | `camlink.lock` | The `masseuse-camlink-gateway` release (tag and checksum) the image carries |
 | `.github/workflows/release.yml` | The build: images to `ghcr.io` stamped with the tag and commit, SLSA provenance, keyless signature, promotion by digest into the enclave's registry, KMS signature, the GitHub Release that records the digest |
-| `terraform/` | The project: service account, Workload Identity Federation pool and providers keyed to the attestation, models bucket, Artifact Registry, static IP, firewall, the slot VM(s), the trainer's start/stop role, the KMS signing key, the release workflow's identity, the sweeper, VPC Service Controls (off until the project has an organization) |
+| `terraform/` | The project: service account, Workload Identity Federation pool and providers keyed to the attestation, models bucket, Artifact Registry, static IP, firewall, the slot VM(s), the masseuse's start/stop role, the KMS signing key, the release workflow's identity, the sweeper, VPC Service Controls (off until the project has an organization) |
 | `verifier/` | `tee-verify`, the standalone attestation checker |
 | `tools/` | `gts-acme-test.sh`: the rig that established Google Trust Services tolerates a fresh certificate on every boot |
 | `build.sh` | The same two image builds, locally, without a push |
@@ -153,7 +154,7 @@ report a check that should hold and does not.
 ## How it runs
 
 A slot exists only while a session needs it. When a masseuse.ai visitor taps
-Enable camera the trainer starts the VM (the one thing its service account
+Enable camera the masseuse starts the VM (the one thing its service account
 may do here); about three minutes later the enclave holds a fresh TLS
 certificate from Google Trust Services issued to a key generated inside it,
 the model weights are in a tmpfs, and the slot attests and takes the lease.
