@@ -47,7 +47,6 @@ resource "google_project_service" "apis" {
     "iamcredentials.googleapis.com",
     "sts.googleapis.com",
     "artifactregistry.googleapis.com",
-    "cloudbuild.googleapis.com",
     "storage.googleapis.com",
     "logging.googleapis.com",
     "cloudkms.googleapis.com",

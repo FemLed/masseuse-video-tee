@@ -39,6 +39,12 @@ Every image is built by `.github/workflows/release.yml` from a tag:
 git tag vX.Y.Z && git push origin vX.Y.Z   # through the release identity
 ```
 
+A tag is final: the repository's ruleset "Tags are immutable" (every tag;
+no update, deletion or force push; no bypass actor, the release identity
+included) refuses to move or remove one, so a mistaken tag is answered by
+the next tag. A tag whose build failed keeps its Release saying so
+(`v0.2.0`).
+
 The workflow builds the base (`workload/Dockerfile`) and the TEE layer
 (`workload/tee/Dockerfile.tee`) with BuildKit, every layer zstd, one OCI
 manifest per image, pushes them to `ghcr.io/femled/masseuse-video-tee`
