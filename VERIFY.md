@@ -173,7 +173,10 @@ to the tag; the operators append what the image changed, when `tee-verify`
 passed against a slot running it and when a session carried it, and when
 it left the trainer's policy. That record is the history this document
 used to hold as a table of digests, and it is written by the release, not
-ahead of it.
+ahead of it. A tag, once created, cannot be moved or deleted by anyone: a
+repository ruleset ("Tags are immutable", on every tag, with no bypass
+actor) refuses updates, deletions and force pushes, so the tag a
+provenance names is still the commit it named when the image was built.
 
 Images before `v0.1.0` were built by Cloud Build in the enclave's project
 from a source tree that was not yet public, with the same Dockerfiles but
