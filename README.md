@@ -5,13 +5,14 @@ that anyone can read what happens to their video and check that the machine
 they are connected to is running exactly this.
 
 masseuse.ai looks at a camera while you use it. The camera is either the
-phone's own, a network camera behind you that the phone names, or a camera
-on your home network carried by the open-source connector
-[masseuse-camlink](https://github.com/FemLed/masseuse-camlink). Whichever it
-is, the video is decrypted in two places only: on your device and inside a
-Google Cloud Confidential Space VM (`a3-highgpu-1g`: Intel TDX, one H100 in
-confidential-computing mode) in the dedicated project
-`prod-masseuse-video-tee`. This repository is that VM's infrastructure, the
+phone's own, a network camera behind you that the phone names, or, through
+the open-source connector
+[masseuse-camlink](https://github.com/FemLed/masseuse-camlink) running on
+the computer in the room, that computer's own camera and microphone or a
+camera on your home network. Whichever it is, the video is decrypted in two
+places only: on your own devices and inside a Google Cloud Confidential
+Space VM (`a3-highgpu-1g`: Intel TDX, one H100 in confidential-computing
+mode) in the dedicated project `prod-masseuse-video-tee`. This repository is that VM's infrastructure, the
 container image it runs, and the tools to verify both.
 
 ## What happens to your video and audio
@@ -86,7 +87,8 @@ record of each release is on its GitHub Release.
   signature and SLSA provenance against the public registry and the Sigstore
   transparency log before it sends a frame.
 
-The two kinds of external camera keep the same boundary:
+The external cameras keep the same boundary, with one difference the third
+kind makes plain:
 
 - **A camera the user names (RTSPS, reachable from the internet).** The phone
   hands the enclave an `rtsps://` link (`PUT /ingest/source`, capability
@@ -95,28 +97,51 @@ The two kinds of external camera keep the same boundary:
   `source: external`, the enclave never logs it, nothing of it persists. The
   enclave probes the camera once for reachability and its certificate's
   SHA-256, then MediaMTX pulls RTSPS with that fingerprint pinned. Plain
-  `rtsp://`, private, loopback, link-local, multicast, CGNAT and unspecified
-  addresses and the VM's own address are refused before any connection. The
-  path is cleared on teardown and by a lease for a different session.
-- **A camera on the user's home network (masseuse-camlink).** The connector
-  carries the camera's RTSPS *ciphertext* to the enclave, where
-  `masseuse-camlink-gateway` (the second binary of that repository, running
-  as one of the processes in this image) hands it to MediaMTX on loopback as
-  if it were the camera. Nothing decrypts in between: the camera's TLS still
-  terminates in MediaMTX with the certificate fingerprint pinned, so neither
-  the connector nor the gateway holds the stream or can substitute one.
-  Before dialing, the connector verifies the slot's attestation the way the
-  phone does, against a policy it only lets tighten the anchors compiled
-  into it (the signing key, the minimum release, this repository, the
-  project and registry the slot runs from), pins the slot's TLS key to the
-  SPKI hash in that attestation, and confirms in the public registry and
-  the Sigstore transparency log that the attested digest is what this
-  repository's release workflow signed and built at the release the image
-  is stamped with. It dials only the single private-network `host:port` the
-  session names. The gateway binary in this image is pinned by release tag
-  and checksum (`camlink.lock`) and rebuilt from the Go module proxy by the
+  `rtsp://`, multicast, CGNAT and unspecified addresses and the VM's own
+  address are refused before any connection; a private, loopback or
+  link-local address is not dialed from the enclave at all but reached
+  through the connector's tunnel, below.
+- **A camera on the user's home network that the session names
+  (masseuse-camlink, relaying).** The connector carries the camera's RTSPS
+  *ciphertext* to the enclave, where `masseuse-camlink-gateway` (the second
+  binary of that repository, running as one of the processes in this image)
+  hands it to MediaMTX on loopback as if it were the camera. Nothing
+  decrypts in between: the camera's TLS still terminates in MediaMTX with
+  the certificate fingerprint pinned, so neither the connector nor the
+  gateway holds the stream or can substitute one. Before dialing, the
+  connector verifies the slot's attestation the way the phone does, against
+  a policy it only lets tighten the anchors compiled into it (the signing
+  key, the minimum release, this repository, the project and registry the
+  slot runs from), pins the slot's TLS key to the SPKI hash in that
+  attestation, and confirms in the public registry and the Sigstore
+  transparency log that the attested digest is what this repository's
+  release workflow signed and built at the release the image is stamped
+  with. It dials only the single private-network `host:port` the session
+  names. The gateway binary in this image is pinned by release tag and
+  checksum (`camlink.lock`) and rebuilt from the Go module proxy by the
   image build, which refuses to build unless the bytes match the signed,
   SLSA-attested release.
+- **The computer's own camera, or a home camera the connector names
+  (masseuse-camlink, serving).** The connector is itself an RTSPS server,
+  reachable only through its tunnel: the phone hands the enclave the fixed
+  link `rtsps://127.0.0.1:7443/camera`, the enclave treats the loopback
+  address as a tunnel target like any private one, probes and pins the
+  connector's certificate through the tunnel as it would a camera's, and
+  MediaMTX pulls the stream the same way. What the connector serves is the
+  computer's camera and microphone (captured with ffmpeg, only while a
+  session is reading) or a camera on the home network that it pulls itself,
+  terminating that camera's TLS on the computer and pinning its certificate
+  there. Here the connector is not a relay of ciphertext: it is the camera,
+  and holds the picture in the clear on the person's own computer, as any
+  camera program does. What holds unchanged is that the stream leaves that
+  computer only inside TLS this attested image terminates, that the
+  connector sends it to nothing but the slot it verified, that the enclave
+  is told of the camera only by the phone's capability, and that the
+  masseuse.ai service never carries a frame: it learns the connector's name
+  for the camera (`POST /api/camlink/source`, so the phone can show it) and
+  nothing else. That the connector does what it says is checked the way
+  this image is: it is open source, and its releases are reproducible and
+  signed.
 
 **One session per slot.** A slot serves one session at a time: the lease
 holds a single capability hash, and the publish and overlay routes accept
