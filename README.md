@@ -79,8 +79,12 @@ record of each release is on its GitHub Release.
   of this repository, or obtain the DTLS keys or the capability.
 - Residual: the JavaScript bundle and the policy (which signing key and
   minimum release the clients accept) are served by masseuse.ai. The
-  provenance on every release, this verifier, and the connector (which runs
-  the checks itself, outside the browser) are the mitigations.
+  provenance on every release, this verifier, and the connector are the
+  mitigations: the connector runs the checks itself, outside the browser,
+  treats the served policy as something that can only tighten the anchors
+  compiled into its reproducible build, and verifies each attested digest's
+  signature and SLSA provenance against the public registry and the Sigstore
+  transparency log before it sends a frame.
 
 The two kinds of external camera keep the same boundary:
 
@@ -102,8 +106,13 @@ The two kinds of external camera keep the same boundary:
   terminates in MediaMTX with the certificate fingerprint pinned, so neither
   the connector nor the gateway holds the stream or can substitute one.
   Before dialing, the connector verifies the slot's attestation the way the
-  phone does and pins the slot's TLS key to the SPKI hash in that
-  attestation. It dials only the single private-network `host:port` the
+  phone does, against a policy it only lets tighten the anchors compiled
+  into it (the signing key, the minimum release, this repository, the
+  project and registry the slot runs from), pins the slot's TLS key to the
+  SPKI hash in that attestation, and confirms in the public registry and
+  the Sigstore transparency log that the attested digest is what this
+  repository's release workflow signed and built at the release the image
+  is stamped with. It dials only the single private-network `host:port` the
   session names. The gateway binary in this image is pinned by release tag
   and checksum (`camlink.lock`) and rebuilt from the Go module proxy by the
   image build, which refuses to build unless the bytes match the signed,
