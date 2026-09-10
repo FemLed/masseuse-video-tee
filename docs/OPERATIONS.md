@@ -276,7 +276,11 @@ posture.
 - `confidential-space-debug` image: container stdout in Cloud Logging and
   on the serial console; memory metrics; SSH via IAP with OS Login
   (`gcloud compute ssh masseuse-video-tee-slot-0 --tunnel-through-iap`),
-  then `sudo ctr -n k8s.io containers list` / `nvidia-smi` on the host.
+  then `sudo ctr -n k8s.io containers list` on the host, and the driver's
+  own tools from where the launcher installed them:
+  `sudo /var/lib/nvidia/bin/nvidia-smi --query-gpu=clocks.sm,power.draw,temperature.gpu,utilization.gpu,clocks_throttle_reasons.active --format=csv`
+  (not on the host's `PATH`) reads the GPU's clocks and power while the
+  workload runs.
 - The producer's control plane through the same tunnel:
   `gcloud compute ssh ... --tunnel-through-iap -- -N -L 18080:127.0.0.1:8080`
   puts the producer's loopback port on the laptop. Control routes want a
@@ -295,8 +299,11 @@ posture.
 - The pose graph batch bench (`workload/pixel/pose_bench.py`): with the
   slot `TERMINATED`, `gcloud compute instances add-metadata
   masseuse-video-tee-slot-0 --zone us-central1-a
-  --metadata tee-env-POSE_GRAPH_BENCH=1,2,4,8`, then start it by hand. The
-  boot runs its usual capture and parity check, then for each batch size
+  --metadata='^;^tee-env-POSE_GRAPH_BENCH=1,2,4,8'` (the `^;^` prefix
+  changes gcloud's list separator, which is otherwise the comma the value
+  needs), then start it by hand. The order given is the order run, so
+  `8,4,2,1` on a second boot tells a batch effect from a drift over time.
+  The boot runs its usual capture and parity check, then for each batch size
   captures a graph over that many pose crops, times it, checks every slot
   of the batch against the production batch-of-one graph and frees it,
   and prints one line per batch to Cloud Logging:
