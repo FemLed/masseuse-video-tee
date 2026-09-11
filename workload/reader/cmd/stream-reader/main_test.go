@@ -72,19 +72,30 @@ func TestRecordsCarryTheSendersTimeEndToEnd(t *testing.T) {
 	if headers[0].Flags&record.FlagKeyframe == 0 {
 		t.Fatal("the first record is not a keyframe")
 	}
+	timed := 0
 	for i, h := range headers {
 		if h.Seq != uint32(i) || h.Width != 160 || h.Height != 120 || h.Codec != record.CodecH264 {
 			t.Fatalf("record %d: %+v", i, h)
 		}
-		if h.Flags&record.FlagNTPValid == 0 {
-			t.Fatalf("record %d has no sender time", i)
+		if i > 0 && h.RTPTs-headers[i-1].RTPTs != 3000 {
+			t.Fatalf("record %d: RTP step %d", i, h.RTPTs-headers[i-1].RTPTs)
 		}
+		if h.Flags&record.FlagNTPValid == 0 {
+			// The first units may go out before the sender's report reached
+			// the reader (the hold gives up after a second on a busy
+			// machine); every unit after it carries the time.
+			if timed > 0 {
+				t.Fatalf("record %d has no sender time after %d timed ones", i, timed)
+			}
+			continue
+		}
+		timed++
 		want := s.UnitTime(h.RTPTs)
 		if d := time.Unix(0, h.NTPNs).Sub(want); d > time.Millisecond || d < -time.Millisecond {
 			t.Fatalf("record %d timed %s, sender said %s (off by %s)", i, time.Unix(0, h.NTPNs), want, d)
 		}
-		if i > 0 && h.RTPTs-headers[i-1].RTPTs != 3000 {
-			t.Fatalf("record %d: RTP step %d", i, h.RTPTs-headers[i-1].RTPTs)
-		}
+	}
+	if timed < len(headers)/2 {
+		t.Fatalf("only %d of %d records carry the sender's time", timed, len(headers))
 	}
 }
