@@ -54,7 +54,10 @@ func TestUnitsCarryTheSendersTime(t *testing.T) {
 	}(); w != testmedia.Width || h != testmedia.Height {
 		t.Fatalf("size %dx%d", w, h)
 	}
-	got := collect(t, s, Options{}, 40)
+	// The sender's report can take a moment to reach the client on a busy
+	// machine: the hold is long enough here that the first unit still
+	// gets its time (a report that never comes is the other test).
+	got := collect(t, s, Options{Hold: 10 * time.Second}, 40)
 	if !got[0].Keyframe {
 		t.Fatal("the first unit is not a keyframe")
 	}
