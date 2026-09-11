@@ -94,6 +94,13 @@ POSE_QUEUE_DEPTH = 2
 # The secondary view's probe cadence while its path has no video track
 # (Decoder.wait_for_track): an ffprobe against the loopback relay.
 TRACK_RETRY_S = 3.0
+# A video track that is announced but carries no frame yet - the connector
+# drops video while its tunnel catches up and resumes at the next keyframe,
+# within seconds - is probed again this often, and given up on as a track
+# without frames after STARVED_TRACK_MAX_S in that state (the primary; the
+# secondary waits as it waits for a track).
+STARVED_RETRY_S = 1.0
+STARVED_TRACK_MAX_S = 30.0
 # The face view's pose cadence. A face in a hand-held or propped phone
 # moves little; three keypoint passes a second draw it and leave the GPU
 # to the body view's six.
@@ -211,7 +218,11 @@ class Decoder:
     not published, or is between cameras - is not an error but a wait,
     probed again every `TRACK_RETRY_S` until a track is there or the
     session stops. The primary keeps raising: its track is what the
-    session was started for.
+    session was started for. A track that is there but starved - announced,
+    no frame of it within ffprobe's window, which is the connector dropping
+    video while its tunnel catches up - is waited for by both, the primary
+    for at most `STARVED_TRACK_MAX_S`: the connector resumes at its next
+    keyframe, and a probe of 0x0 is not a geometry to pin the pipe to.
 
     Time. A live stream is read through stream-reader when the binary is
     there (`reader_bin`, STREAM_READER_BIN): each frame comes with the
@@ -354,6 +365,7 @@ class Decoder:
         """
         starved_since: float | None = None
         said = False
+        starved_since: float | None = None
         while True:
             if self._stopped():
                 return None
@@ -574,16 +586,27 @@ class Decoder:
 
 
 class PoseWorker(threading.Thread):
-    """Pose at the 6fps cadence, never allowed to block the decode."""
+    """Pose at the 6fps cadence, never allowed to block the decode.
 
-    def __init__(self, pose, assembler: RowAssembler, lock: threading.Lock,
+    `view` names the stream this worker poses (`GpuPose.step`'s view; None
+    is the body's) and `stage` the telemetry stage its steps time. A worker
+    without an assembler - the face view's - hands its rows to `on_pose`
+    only: the assembler and the descriptors are the body's.
+    """
+
+    def __init__(self, pose, assembler: RowAssembler | None, lock: threading.Lock,
                  telemetry: Telemetry, on_row=None,
-                 queue_depth: int | None = None, on_pose=None):
+                 queue_depth: int | None = None, on_pose=None,
+                 view: str | None = None, stage: str = "pose",
+                 dropped_counter: str = "poseDropped"):
         super().__init__(daemon=True)
         self.pose = pose
         self.assembler = assembler
         self.lock = lock
         self.telemetry = telemetry
+        self.view = view
+        self.stage = stage
+        self.dropped_counter = dropped_counter
         # Every real pose row in slot order, with its flags and the frame
         # size, for the analysis process (the `pose` message of
         # analysis/protocol.md): the interpolated rows the assembler makes
@@ -623,7 +646,7 @@ class PoseWorker(threading.Thread):
             # The clock must advance even when the pose is dropped, or the
             # assembler would wait forever for a decision that never comes -
             # but only once the slots ahead of it have reported.
-            self.telemetry.count("poseDropped")
+            self.telemetry.count(self.dropped_counter)
             row = {"frame": index, "atS": round(at_s, 4), "keypoints": None}
             self._finish(index, row, {"dropped": True})
 
@@ -635,8 +658,9 @@ class PoseWorker(threading.Thread):
             while self._order and self._order[0] in self._finished:
                 ready.append(self._finished.pop(self._order.popleft()))
         for ready_row, ready_flags in ready:
-            with self.lock:
-                self.assembler.push_pose(ready_row)
+            if self.assembler is not None:
+                with self.lock:
+                    self.assembler.push_pose(ready_row)
             if self.on_pose is not None:
                 try:
                     self.on_pose(ready_row, ready_flags, self.frame_size)
@@ -662,8 +686,11 @@ class PoseWorker(threading.Thread):
             if self.frame_size is None and hasattr(rgb, "shape"):
                 self.frame_size = (int(rgb.shape[1]), int(rgb.shape[0]))
             try:
-                with self.telemetry.time_stage("pose"):
-                    row = self.pose.step(rgb, index, at_s)
+                with self.telemetry.time_stage(self.stage):
+                    if self.view is None:
+                        row = self.pose.step(rgb, index, at_s)
+                    else:
+                        row = self.pose.step(rgb, index, at_s, view=self.view)
             except Exception as error:  # noqa: BLE001 - said aloud, survived
                 # An uncaught step error would kill this thread and the rest
                 # of the session would report only runaway poseDropped (a
@@ -800,7 +827,19 @@ def capture_dir(sink_dir: str, run_name: str) -> Path:
 
 
 class Session:
-    """One stream, start to stop."""
+    """One stream, start to stop - or two.
+
+    With `args.face_stream` (a fixed camera behind the user as the stream,
+    the phone's own camera as the face stream) the session reads both: the
+    body view is everything a session was - pose, descriptors, the analysis
+    messages, the annotated view - and the face view is decoded beside it,
+    posed at FACE_POSE_FPS through the same model, drawn as an inset over
+    the view (overlay.py) and sent to the analysis as `facePose` rows; the
+    two are lined up on one clock (sync.py). `args.audio_stream` names the
+    stream whose audio track --audio reads: the phone's, when both are
+    present, since it is the one near the user's face. Two views need the
+    GPU pose; a sideload session reads the body alone.
+    """
 
     def __init__(self, args, telemetry: Telemetry):
         self.args = args
@@ -813,6 +852,18 @@ class Session:
             started = time.monotonic()
             self.pose = acquire_gpu_pose(args, telemetry)
         telemetry.boot_phase("poseReady", started)
+        face_stream = getattr(args, "face_stream", "") or ""
+        if face_stream and args.pose != "gpu":
+            print("face view: needs --pose gpu; reading the body view alone",
+                  flush=True)
+            face_stream = ""
+        if face_stream == args.stream:
+            face_stream = ""  # one camera is one view
+        self.face_stream = face_stream
+        self.audio_stream = getattr(args, "audio_stream", "") or args.stream
+        # The two views' clocks, on this host's wall clock - the scale the
+        # decoders' sender-time epochs are on (sync.py).
+        self.sync = ViewSync(clock=time.time) if face_stream else None
 
         # Pose cadence and the interpolation bridge it needs: the bridge
         # scales with the pose interval (1.3x of it, at least 0.35 s).
@@ -841,15 +892,16 @@ class Session:
         record = (self.capture.directory / "overlay.mp4"
                   if getattr(args, "overlay_record", False) else None)
         self.overlay = build_renderer(args, telemetry, source_fps=FPS,
-                                      record_path=record)
+                                      record_path=record, sync=self.sync)
         # The audio stage (workload/audio/audio_stage.py): the stream's
         # audio track, if it has one, classified and measured in this
         # process; its numbers go over the same socket. The classifier is
         # loaded here, before the link, so a missing library fails the
         # session before anything else is up.
         self.stream_at_s: float | None = None
-        # The body view's decoder, once run() has made it (views()).
+        # The views' decoders, once run() has made them (views()).
         self.decoder: Decoder | None = None
+        self.face_decoder: Decoder | None = None
         self.audio_classifier = (acquire_audio_classifier(telemetry)
                                  if getattr(args, "audio", False) else None)
         self.audio: AudioStage | None = None
@@ -865,7 +917,9 @@ class Session:
             run=self.run_name or None,
             audio=self.audio_classifier is not None,
             audioModel=(self.audio_classifier.version
-                        if self.audio_classifier is not None else None))
+                        if self.audio_classifier is not None else None),
+            views=(["body", "face"] if self.face_stream else ["body"]),
+            facePoseFps=(FACE_POSE_FPS if self.face_stream else None))
         if self.analysis.connected:
             ready = self.analysis.ready or {}
             print(f"analysis: {ready.get('version', '?')} "
@@ -873,7 +927,7 @@ class Session:
                   f"{args.analysis_socket}", flush=True)
         if self.audio_classifier is not None:
             self.audio = AudioStage(
-                AudioSource(args.stream, telemetry,
+                AudioSource(self.audio_stream, telemetry,
                             realtime=args.pose == "gpu", stopping=self.stopping),
                 self.audio_classifier, self.analysis.send, telemetry,
                 stream_clock=lambda: self.stream_at_s)
@@ -954,6 +1008,62 @@ class Session:
             "frameSize": list(frame_size) if frame_size else None,
         })
 
+    def _on_face_pose(self, row: dict, flags: dict,
+                      frame_size: tuple[int, int] | None) -> None:
+        """Every real face-view pose row, from the face pose worker: the
+        `facePose` message, with the body view's moment for it."""
+        body_at_s = self.sync.body_at_s(row["atS"]) if self.sync else None
+        self.analysis.send({
+            "kind": "facePose",
+            "frame": row["frame"],
+            "atS": row["atS"],
+            "bodyAtS": round(body_at_s, 4) if body_at_s is not None else None,
+            "keypoints": row.get("keypoints"),
+            "dropped": bool(flags.get("dropped")),
+            "error": bool(flags.get("error")),
+            "frameSize": list(frame_size) if frame_size else None,
+        })
+
+    def _clock_view(self, clock, decoder: "Decoder", at_s: float) -> None:
+        """Place one view on the shared clock from its decoder: anchored on
+        the sender-time epoch when the view has one, estimated from
+        arrivals otherwise (sync.py)."""
+        if decoder.timing == "ntp" and decoder.epoch is not None:
+            if not clock.anchored or clock.offset != decoder.epoch:
+                clock.anchor(decoder.epoch)
+            clock.note(at_s)
+            return
+        if clock.anchored:
+            clock.anchor(None)
+        clock.note(at_s)
+
+    def _face_loop(self, decoder: "Decoder", worker: "PoseWorker") -> None:
+        """The face view's decode: frames to the overlay, every
+        FACE_POSE_FPS-th to its pose worker, its clock kept. On its own
+        thread; ends with the session or the stream."""
+        stride = max(1, int(round(FPS / FACE_POSE_FPS)))
+        width = None
+        try:
+            for index, at_s, yuv in decoder.frames():
+                if self.stopping.is_set():
+                    break
+                self._clock_view(self.sync.face, decoder, at_s)
+                self.telemetry.count("faceFramesIn")
+                if width is None:
+                    width = yuv.shape[1]
+                if self.overlay is not None:
+                    self.overlay.offer_face_frame(index, at_s, yuv)
+                if index % stride == 0:
+                    with self.telemetry.time_stage("faceRgb"):
+                        rgb = cv2.cvtColor(
+                            yuv.reshape(-1, width), cv2.COLOR_YUV2RGB_I420)
+                    worker.submit(rgb, index, at_s)
+        except Exception as error:  # noqa: BLE001 - said aloud; the body goes on
+            self.telemetry.count("faceViewErrors")
+            print(f"face view failed: {error!r}", flush=True)
+        finally:
+            decoder.stop()
+
     def _gauges(self, at_s: float, wall_start: float,
                 queued: int) -> None:
         wall = time.monotonic() - wall_start
@@ -992,12 +1102,17 @@ class Session:
 
     def views(self) -> dict:
         """How each view's frames are timed (`Decoder.timing`) and where
-        its grid starts, for /statz."""
+        its grid starts, for /statz; with two views, how they stand to each
+        other."""
         out = {}
-        decoder = self.decoder
-        if decoder is not None:
-            out["body"] = {"timing": decoder.timing, "epoch": decoder.epoch,
-                           "url": decoder.url}
+        for name, decoder in (("body", self.decoder), ("face", self.face_decoder)):
+            if decoder is not None:
+                out[name] = {"timing": decoder.timing, "epoch": decoder.epoch,
+                             "url": decoder.url}
+        if self.sync is not None:
+            skew = self.sync.skew_s()
+            out["sync"] = {"timing": self.sync.timing,
+                           "skewMs": round(skew * 1000) if skew is not None else None}
         return out
 
     def run(self) -> dict:
@@ -1010,16 +1125,40 @@ class Session:
         worker = PoseWorker(self.pose, self.assembler, self.assembler_lock,
                             self.telemetry, on_row=self.capture.pose,
                             on_pose=self._on_pose)
+        face_worker: PoseWorker | None = None
+        face_thread: threading.Thread | None = None
+        if self.face_stream:
+            # The face view: its own decoder (waiting for the phone's track
+            # rather than failing without it), its own pose worker at the
+            # face cadence, no assembler and no descriptors.
+            self.face_decoder = Decoder(
+                self.face_stream, self.telemetry,
+                realtime=self.args.pose == "gpu", stopping=self.stopping,
+                wait_for_track=True)
+            face_worker = PoseWorker(
+                self.pose, None, self.assembler_lock, self.telemetry,
+                on_pose=self._on_face_pose, view="face", stage="facePose",
+                dropped_counter="facePoseDropped")
+            face_thread = threading.Thread(
+                target=self._face_loop, args=(self.face_decoder, face_worker),
+                daemon=True)
         if self.overlay is not None:
             # The full result reaches the overlay before row_for narrows it;
             # the tap is per session on a process-wide GpuPose.
             self.pose.on_full = self.overlay.offer_pose
+            if face_worker is not None:
+                self.pose.view("face").on_full = self.overlay.offer_face_pose
             self.overlay.start()
             print(f"overlay: publishing {self.overlay.publisher.url} "
                   f"{self.overlay.snapshot()['size']}@{self.overlay.fps:g} "
                   f"{self.overlay.publisher.encoder}, {self.overlay.delay_s:.1f}s "
-                  f"behind decode", flush=True)
+                  f"behind decode"
+                  + (f", face inset from {self.face_stream}" if self.face_stream else ""),
+                  flush=True)
         worker.start()
+        if face_worker is not None:
+            face_worker.start()
+            face_thread.start()
         if self.audio is not None:
             self.audio.start()
         # Descriptors off the decode thread. Measuring a frame pair costs
@@ -1053,10 +1192,14 @@ class Session:
                     height = yuv.shape[0] * 2 // 3
                 gray = yuv[:height]
                 self.telemetry.count("framesIn")
+                if self.sync is not None:
+                    self._clock_view(self.sync.body, decoder, at_s)
                 if self.overlay is not None:
                     self.overlay.offer_frame(index, at_s, yuv)  # O(1): a reference
-                    if decoder.timing != timing_said:
-                        timing_said = decoder.timing
+                    timing = (self.sync.timing if self.sync is not None
+                              else decoder.timing)
+                    if timing != timing_said:
+                        timing_said = timing
                         self.overlay.offer_context("timing", timing_said)
                 pending[index] = gray.copy()
                 if len(pending) > PENDING_CAP:
@@ -1094,6 +1237,13 @@ class Session:
         finally:
             worker.stopping.set()
             decoder.stop()
+            if face_worker is not None:
+                # The face view ends with the body's: its decoder is
+                # stopped (the loop sees `stopping` too) and its worker
+                # released.
+                face_worker.stopping.set()
+                self.face_decoder.stop()
+                face_thread.join(timeout=5.0)
             if self.audio is not None:
                 # Its ffmpeg dies with the decoder's; the thread finishes
                 # the hop it is on, answers pending requests "closed" and
@@ -1104,6 +1254,8 @@ class Session:
                 # Before the capture closes: the recording, if any, must be
                 # finalised on disk to ride the upload with the jsonl files.
                 self.pose.on_full = None
+                if face_worker is not None:
+                    self.pose.view("face").on_full = None
                 self.overlay.close()
             with self.assembler_lock:
                 rows = self.assembler.drain(last_index)
@@ -1429,15 +1581,19 @@ EXTERNAL_VIEW_SIZE = "1280x720"
 
 
 def external_view_args(session_args, external) -> bool:
-    """Retune a /produce's annotated view when its stream is the external
-    camera's path: a fixed camera behind the user is landscape and not a
-    selfie, so the view goes out 16:9 and unmirrored, whatever the phone's
-    own camera is published as (--overlay-size/--overlay-mirror in
-    tee/entrypoint.sh). True when it did."""
+    """Retune a /produce when its stream is the external camera's path: a
+    fixed camera behind the user is landscape and not a selfie, so the view
+    goes out 16:9 and unmirrored, whatever the phone's own camera is
+    published as (--overlay-size/--overlay-mirror in tee/entrypoint.sh);
+    and the phone's camera stays live beside it - its stream is the face
+    view drawn as an inset, its microphone the one the audio stage listens
+    to (Session). True when it did."""
     if external is None or getattr(session_args, "stream", "") != external.stream_url:
         return False
     session_args.overlay_mirror = False
     session_args.overlay_size = EXTERNAL_VIEW_SIZE
+    session_args.face_stream = external.phone_stream_url
+    session_args.audio_stream = external.phone_stream_url
     return True
 
 
@@ -1454,6 +1610,9 @@ def build_server(args, telemetry: Telemetry,
     # The session behind the busy lock, for /stop; set and cleared by the
     # /produce handler while it holds the lock.
     current: dict = {"session": None}
+    # How the phone's picture is drawn as the face inset (/ingest/view):
+    # kept for the slot, so it outlives the session it was set in.
+    view_prefs: dict = {"mirror": False}
     warmup: dict = {"thread": None, "error": None}
     teardown = Teardown(
         busy, drain_s=getattr(args, "teardown_drain_s", TEARDOWN_DRAIN_S))
@@ -1809,6 +1968,56 @@ def build_server(args, telemetry: Telemetry,
             telemetry.count("externalSourceConnected")
             self._json(200, answer, cors)
 
+        def _view(self) -> None:
+            """/ingest/view: how the phone's own picture is drawn while an
+            external camera is the session's - the face inset's
+            `mirror` (the phone says whether its camera faces the user, so
+            the inset reads as a mirror the way its own preview did). PUT
+            {mirror} sets it for the running session and the next; GET
+            reads it back. Gated by the phone's capability like WHIP: the
+            picture is the phone's to arrange.
+            """
+            cors = self._cors()
+            if self.command == "OPTIONS":
+                self.send_response(204)
+                for name, value in cors:
+                    self.send_header(name, value)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if self.command not in ("PUT", "GET"):
+                self._json(405, {"error": "method not allowed"},
+                           cors + [("Allow", "OPTIONS, PUT, GET")])
+                return
+            if self._tee_signalling_gate("view") is None:
+                return
+            if self.command == "PUT":
+                length = int(self.headers.get("Content-Length") or 0)
+                if length > LEASE_BODY_CAP:
+                    self._json(413, {"error": "body too large"}, cors)
+                    return
+                try:
+                    body = json.loads(self.rfile.read(length) or b"{}")
+                    if not isinstance(body, dict) or not isinstance(
+                            body.get("mirror"), bool):
+                        raise ValueError("expected {\"mirror\": true|false}")
+                except ValueError as error:
+                    self._json(400, {"error": f"invalid body: {error}"}, cors)
+                    return
+                view_prefs["mirror"] = body["mirror"]
+                session = current["session"]
+                overlay = getattr(session, "overlay", None) if session else None
+                set_mirror = getattr(overlay, "set_mirror", None)
+                if callable(set_mirror):
+                    set_mirror(body["mirror"])
+                telemetry.count("viewMirrorSet")
+            session = current["session"]
+            overlay = getattr(session, "overlay", None) if session else None
+            snapshot = overlay.snapshot() if overlay is not None else None
+            self._json(200, {"mirror": view_prefs["mirror"],
+                             "view": (snapshot or {}).get("view")},
+                       cors + [("Cache-Control", "no-store")])
+
         # -- the relay routes ------------------------------------------------
 
         def _overlay(self) -> bool:
@@ -1841,6 +2050,13 @@ def build_server(args, telemetry: Telemetry,
                                               "Confidential Space slot"})
                 else:
                     self._source()
+                return True
+            if kind == "view":
+                if tee is None:
+                    self._json(404, {"error": "the face inset needs a "
+                                              "Confidential Space slot"})
+                else:
+                    self._view()
                 return True
             if kind in ("status", "ingest-status"):
                 if self.command != "GET":
@@ -2115,7 +2331,8 @@ def build_server(args, telemetry: Telemetry,
                     # A TEE run leaves no production-capture evidence by
                     # design: no annotated recording, whatever was asked.
                     session_args.overlay_record = False
-                external_view_args(session_args, external)
+                if external_view_args(session_args, external):
+                    session_args.face_mirror = view_prefs["mirror"]
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
@@ -2232,6 +2449,17 @@ def build_parser() -> argparse.ArgumentParser:
                              "vocalization labels with level and pitch and "
                              "send those numbers over the analysis socket; "
                              "needs CED_LIBRARY_PATH and CED_MODEL_PATH")
+    parser.add_argument("--face-stream", default="",
+                        help="a second stream, decoded beside --stream and "
+                             "drawn as an inset over the annotated view with "
+                             "its own keypoints: the phone's camera while "
+                             "--stream is a fixed camera behind the user. In "
+                             "TEE mode it is set for a /produce on the "
+                             "external camera's path. Needs --pose gpu")
+    parser.add_argument("--audio-stream", default="",
+                        help="the stream whose audio track --audio reads; "
+                             "default --stream's (the phone's, in TEE mode, "
+                             "when both cameras are present)")
     parser.add_argument("--duration", type=float, default=0.0)
     parser.add_argument("--input-lost-after", type=float, default=0.0,
                         help="end the session once the stream has delivered "

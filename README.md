@@ -28,6 +28,21 @@ Inside the enclave, in code that is in this repository:
 - An annotated view (skeleton, boxes, a status line) is drawn on the frames
   and streamed back to the same device that sent the video, and to nothing
   else.
+- With a second camera - a fixed one behind the user, through a connector
+  or named directly (the trust boundary below) - the phone's own camera
+  stays live too. The fixed camera's picture is the session's: the body
+  view, which everything above runs on. The phone's picture is decoded
+  beside it, its person and keypoints found by the same detectors at a
+  lower cadence, and drawn as an inset in the top-right corner of the
+  annotated view with those keypoints, cropped to follow the face and
+  mirrored the way the phone's own preview was when its camera faces the
+  user (the phone says which, `PUT /ingest/view`). The two pictures are
+  lined up by the time each frame was taken - both senders time their
+  frames with their own clocks (RTCP sender reports), the relay keeps
+  those times, and `workload/reader/` reads them beside the frames - so
+  the inset shows the same moment as the body view. Only the phone's
+  microphone is listened to then, being the one near the user's face; the
+  fixed camera's sound, if it has any, is not read.
 - When the stream carries an audio track (the phone's microphone travels
   with its camera unless you turn it off with `?mic=0`; a network camera's
   microphone, when it has one), the audio is decoded to 16 kHz mono and,
@@ -39,9 +54,10 @@ Inside the enclave, in code that is in this repository:
 - Frames and audio are then discarded. Nothing is written to disk; the VM
   has no persistent storage and nobody at masseuse.ai can read its memory.
 
-The keypoints, descriptors and vocalization labels, which identify nobody,
-go to an analysis module that turns them into a few numbers per second for
-the masseuse (the masseuse.ai service on Cloud Run). The analysis module
+The keypoints (the face view's included, as their own rows), descriptors
+and vocalization labels, which identify nobody, go to an analysis module
+that turns them into a few numbers per second for the masseuse (the
+masseuse.ai service on Cloud Run). The analysis module
 runs inside the same enclave as a separate process, receives no frames and
 no audio, and its logic is not published; its exact version is pinned by
 hash in this repository so the attested image says which one is running.
@@ -142,6 +158,15 @@ kind makes plain:
   nothing else. That the connector does what it says is checked the way
   this image is: it is open source, and its releases are reproducible and
   signed.
+
+With any of the three, the phone keeps publishing its own camera to the
+slot over WHIP as before, and the two pictures meet only inside this
+image: the fixed camera's as the body view, the phone's as the face inset
+drawn over it, both returned over the one WHEP leg to the same phone. The
+phone's capability is what opens `PUT /ingest/view`, the one control over
+how its picture is drawn (mirrored or not); the masseuse learns the layout
+and the inset's place from the slot's status (`overlay.view`) and nothing
+of either picture.
 
 **One session per slot.** A slot serves one session at a time: the lease
 holds a single capability hash, and the publish and overlay routes accept
