@@ -616,7 +616,7 @@ def test_the_phone_names_an_external_camera_with_its_capability():
         assert slot.relay.ext_config == {
             "source": "rtsps://viewer:s3cret@cam.example:7441/back?enableSrtp",
             "sourceFingerprint": FINGERPRINT, "rtspTransport": "tcp",
-            "sourceOnDemand": False}
+            "sourceOnDemand": False, "useAbsoluteTimestamp": True}
         code, _, body = slot.as_phone(cap, "GET", "/ingest/source")
         assert json.loads(body)["kind"] == "external"
 

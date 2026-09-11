@@ -50,6 +50,7 @@ import os
 import queue
 import re
 import signal
+import struct
 import subprocess
 import sys
 import threading
@@ -77,6 +78,7 @@ from overlay import build_renderer  # noqa: E402
 from relay_proxy import (RelayProxy, location_secret,  # noqa: E402
                          route as relay_route)
 from sinks import Capture, Poster  # noqa: E402
+from sync import ViewSync  # noqa: E402
 from tee_mode import (CLIENT_NONCE, IdleExit, TeeMode,  # noqa: E402
                       bearer as bearer_token, cors_headers)
 from telemetry import Telemetry  # noqa: E402
@@ -89,6 +91,34 @@ FPS = 30.0
 # at whatever the first seconds carried.
 STREAM_LONG_SIDE = 1280
 POSE_QUEUE_DEPTH = 2
+# The secondary view's probe cadence while its path has no video track
+# (Decoder.wait_for_track): an ffprobe against the loopback relay.
+TRACK_RETRY_S = 3.0
+# The face view's pose cadence. A face in a hand-held or propped phone
+# moves little; three keypoint passes a second draw it and leave the GPU
+# to the body view's six.
+FACE_POSE_FPS = 3.0
+# stream-reader (workload/reader): reads a live stream's video track with
+# the time its sender gave each frame and hands the frames over as records
+# (workload/reader/record). Without the binary a live stream is decoded
+# by ffmpeg as before, timed by arrival.
+STREAM_READER_BIN = os.environ.get("STREAM_READER_BIN", "/app/bin/stream-reader")
+# The record header, little-endian: magic, version, flags, codec,
+# reserved, seq, ntp_ns, rtp_ts, width, height, length.
+RECORD = struct.Struct("<4sBBBBIqIHHI")
+RECORD_MAGIC = b"MSFR"
+RECORD_VERSION = 1
+RECORD_NTP_VALID = 0x01
+RECORD_KEYFRAME = 0x02
+RTP_CLOCK = 90000
+# The 30 fps grid a live view's frames are laid on by their time. A gap up
+# to this is filled by repeating the last frame (a sender below 30 fps, a
+# frame the relay dropped); a longer one - a reconnect, a pause - is left
+# as a jump in the frame index, the way the stream really went.
+GRID_DUP_MAX_S = 0.5
+# A sender whose clock is further than this from the enclave's is not
+# believed: its view is timed by arrival instead, and says so.
+CLOCK_SKEW_MAX_S = 10.0
 # A run name becomes a capture sub-directory and a GCS path segment.
 RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 # The only files a /produce request may name: the bucket mount. A track or
@@ -175,19 +205,47 @@ class Decoder:
     tunnel catches up - is waited for, for at most `STARVED_TRACK_MAX_S`:
     the connector resumes at its next keyframe, and a probe of 0x0 is not a
     geometry to pin the pipe to.
+
+    `wait_for_track` is the secondary view's shape (the phone's camera
+    beside a fixed one): a path with no video track yet - the phone has
+    not published, or is between cameras - is not an error but a wait,
+    probed again every `TRACK_RETRY_S` until a track is there or the
+    session stops. The primary keeps raising: its track is what the
+    session was started for.
+
+    Time. A live stream is read through stream-reader when the binary is
+    there (`reader_bin`, STREAM_READER_BIN): each frame comes with the
+    moment its sender gave it (the RTCP sender report's NTP time), and the
+    frames are laid on the 30 fps grid by that moment - slot zero is the
+    first frame's, the view's `epoch`, and a frame's index is how many
+    slots its time is past it. A sender below 30 fps repeats the last
+    frame into the slots it skips (`frameDup`); a frame timed at or before
+    the last slot filled is dropped (`frameEarly`); a gap longer than
+    GRID_DUP_MAX_S is left as a jump (`frameGap`), and the epoch survives
+    reconnects, so the index says where in the stream a frame really is.
+    `timing` says how the view is timed: `ntp` on the sender's clock, or
+    `arrival` - the reader is absent, the sender does not report, or its
+    clock is more than CLOCK_SKEW_MAX_S from this host's (`clockSkew`) -
+    in which case the grid runs on the frames' RTP timestamps from an
+    arrival-time epoch, or, without the reader, on the ffmpeg cadence as
+    before. Two views on `ntp` line up exactly (sync.py); a `file` keeps
+    its own count.
     """
 
     def __init__(self, url: str, telemetry: Telemetry,
                  realtime: bool = False,
                  stopping: threading.Event | None = None,
                  lost_after_s: float = 0.0, clock=time.monotonic,
-                 sleep=time.sleep):
+                 sleep=time.sleep, wait_for_track: bool = False,
+                 reader_bin: str | None = None, wall=time.time):
         self.url = url
         self.telemetry = telemetry
         self.stopping = stopping
         self.lost_after_s = float(lost_after_s or 0.0)
         self.clock = clock
         self.sleep = sleep
+        self.wall = wall
+        self.wait_for_track = wait_for_track
         # A file decodes as fast as ffmpeg can read it, which starves a
         # real GPU pose worker of wall time and craters the delivered pose
         # cadence in media time. -re paces a file like the camera it stands
@@ -205,6 +263,18 @@ class Decoder:
         # and ffmpeg is told to deliver exactly it; a file's is its own.
         self.size: tuple[int, int] | None = None
         self.probed: tuple[int, int] | None = None
+        # The reader, when a live stream has one to be read through.
+        self.reader_bin = (STREAM_READER_BIN if reader_bin is None
+                           else reader_bin)
+        self.use_reader = network and bool(self.reader_bin) and os.path.isfile(
+            self.reader_bin)
+        # How the frames are timed (see the class docstring) and slot
+        # zero's moment: the sender's clock as unix seconds on `ntp`, this
+        # host's on `arrival`; None for a file, or before the first frame.
+        self.timing = ("file" if not network
+                       else "ntp" if self.use_reader else "arrival")
+        self.epoch: float | None = None
+        self._said_skew = False
 
     def _probe(self) -> tuple[int, int]:
         out = subprocess.run(
@@ -259,17 +329,31 @@ class Decoder:
                 "-vf", self._filters(), "-f", "rawvideo",
                 "-pix_fmt", "yuv420p", "pipe:1"]
 
+    def _reader_argv(self) -> list[str]:
+        width, height = self.size
+        return [self.reader_bin, "-url", self.url,
+                "-width", str(width), "-height", str(height)]
+
     def _spawn(self) -> None:
-        self.proc = subprocess.Popen(self._argv(), stdout=subprocess.PIPE)
+        argv = self._reader_argv() if self.use_reader else self._argv()
+        self.proc = subprocess.Popen(argv, stdout=subprocess.PIPE)
 
     def _stopped(self) -> bool:
         return self.stopping is not None and self.stopping.is_set()
 
     def _await_probe(self) -> tuple[int, int] | None:
-        """The probe, repeated while the track is starved of frames, for at
-        most STARVED_TRACK_MAX_S; None once the session stopped while
-        waiting."""
+        """The probe, repeated while the track is not yet decodable.
+
+        A track that is starved (`StarvedTrack`: announced, no frame of it
+        within ffprobe's window - the connector dropping video while its
+        tunnel catches up) is probed again every STARVED_RETRY_S, for at
+        most STARVED_TRACK_MAX_S, then raised as an error. A track that is
+        not there at all is an error too - unless `wait_for_track`, in which
+        case both shapes are waited for as long as the session lasts, every
+        TRACK_RETRY_S. None once the session stopped while waiting.
+        """
         starved_since: float | None = None
+        said = False
         while True:
             if self._stopped():
                 return None
@@ -282,11 +366,23 @@ class Decoder:
                     print(f"decoder: {self.url} has a video track but no "
                           f"frames yet; waiting for its next keyframe",
                           flush=True)
-                elif now - starved_since >= STARVED_TRACK_MAX_S:
+                elif (now - starved_since >= STARVED_TRACK_MAX_S
+                      and not self.wait_for_track):
                     raise RuntimeError(
                         f"{error} after {STARVED_TRACK_MAX_S:g} s") from None
                 self.telemetry.count("starvedProbes")
-            deadline = self.clock() + STARVED_RETRY_S
+                retry_s = STARVED_RETRY_S
+            except (RuntimeError, OSError, ValueError,
+                    subprocess.TimeoutExpired) as error:
+                if not self.wait_for_track:
+                    raise
+                self.telemetry.count("trackWaits")
+                if not said:
+                    said = True
+                    print(f"decoder: {self.url} has no video track yet "
+                          f"({error}); waiting", flush=True)
+                retry_s = TRACK_RETRY_S
+            deadline = self.clock() + retry_s
             while self.clock() < deadline:
                 if self._stopped():
                     return None
@@ -301,40 +397,176 @@ class Decoder:
             self.probed = probed
             self.size = pipe_size(self.probed) if self.network else self.probed
             print(f"decoder: {self.url} probed {self.probed[0]}x{self.probed[1]}, "
-                  f"decoding at {self.size[0]}x{self.size[1]}", flush=True)
+                  f"decoding at {self.size[0]}x{self.size[1]}"
+                  + (" through stream-reader" if self.use_reader else ""),
+                  flush=True)
+        if self.use_reader:
+            yield from self._frames_from_reader()
+        else:
+            yield from self._frames_from_ffmpeg()
+
+    def _ended(self, lost_since: float | None) -> tuple[bool, float | None]:
+        """The pipe ended: whether to give up, and the loss clock.
+        Reconnects a network stream after a second; a file is over."""
+        self.telemetry.count("reconnects")
+        self.proc.stdout.close()
+        self.proc.wait()
+        self.proc = None
+        if not self.url.startswith(("rtsp://", "rtsps://")):
+            return True, lost_since  # a file ended; only network streams reconnect
+        now = self.clock()
+        if lost_since is None:
+            lost_since = now
+        elif self.lost_after_s and now - lost_since >= self.lost_after_s:
+            self.telemetry.count("inputLost")
+            print(f"decoder: no frames from {self.url} for "
+                  f"{now - lost_since:.0f}s; treating the stream as "
+                  "ended", flush=True)
+            return True, lost_since
+        self.sleep(1.0)
+        return False, lost_since
+
+    def _frames_from_ffmpeg(self):
+        """ffmpeg's rawvideo pipe: one frame per read, timed by count."""
         width, height = self.size
         frame_bytes = width * height * 3 // 2
         index = 0
         lost_since: float | None = None
         while True:
-            if self.stopping is not None and self.stopping.is_set():
+            if self._stopped():
                 return
             if self.proc is None or self.proc.poll() is not None:
                 self._spawn()
             buffer = self.proc.stdout.read(frame_bytes)
             if len(buffer) < frame_bytes:
-                self.telemetry.count("reconnects")
-                self.proc.stdout.close()
-                self.proc.wait()
-                self.proc = None
-                if not self.url.startswith(("rtsp://", "rtsps://")):
-                    return  # a file ended; only network streams reconnect
-                now = self.clock()
-                if lost_since is None:
-                    lost_since = now
-                elif self.lost_after_s and now - lost_since >= self.lost_after_s:
-                    self.telemetry.count("inputLost")
-                    print(f"decoder: no frames from {self.url} for "
-                          f"{now - lost_since:.0f}s; treating the stream as "
-                          "ended", flush=True)
+                ended, lost_since = self._ended(lost_since)
+                if ended:
                     return
-                self.sleep(1.0)
                 continue
             lost_since = None
+            if self.epoch is None:
+                self.epoch = self.wall()
             yuv = np.frombuffer(buffer, np.uint8).reshape(
                 height * 3 // 2, width)
             yield index, index / FPS, yuv
             index += 1
+
+    def _read_exact(self, n: int) -> bytes:
+        """Up to n bytes from the reader's pipe; short at its end."""
+        out = self.proc.stdout.read(n)
+        while len(out) < n:
+            more = self.proc.stdout.read(n - len(out))
+            if not more:
+                break
+            out += more
+        return out
+
+    def _frames_from_reader(self):
+        """stream-reader's records, laid on the grid by their time."""
+        width, height = self.size
+        frame_bytes = width * height * 3 // 2
+        next_index = 0          # the next slot to fill
+        last_yuv: np.ndarray | None = None
+        lost_since: float | None = None
+        # This connection's RTP timeline, for `arrival` timing: the first
+        # frame's timestamp, its unwrapped position, and its wall moment.
+        rtp_first: int | None = None
+        rtp_prev: int | None = None
+        rtp_pos = 0
+        conn_wall: float | None = None
+        conn_timing: str | None = None
+        while True:
+            if self._stopped():
+                return
+            if self.proc is None or self.proc.poll() is not None:
+                self._spawn()
+                rtp_first = rtp_prev = None
+                rtp_pos = 0
+                conn_wall = conn_timing = None
+            header = self._read_exact(RECORD.size)
+            if len(header) < RECORD.size:
+                ended, lost_since = self._ended(lost_since)
+                if ended:
+                    return
+                continue
+            (magic, version, flags, _codec, _pad, _seq, ntp_ns, rtp_ts,
+             rec_width, rec_height, length) = RECORD.unpack(header)
+            if (magic != RECORD_MAGIC or version != RECORD_VERSION
+                    or (rec_width, rec_height) != (width, height)
+                    or length != frame_bytes):
+                # Not a record of ours, or not the frame we asked for: the
+                # pipe is out of step; start it over.
+                self.telemetry.count("readerDesync")
+                print(f"decoder: {self.url} reader out of step "
+                      f"(magic {magic!r} v{version} {rec_width}x{rec_height} "
+                      f"{length} bytes); restarting it", flush=True)
+                self.proc.kill()
+                ended, lost_since = self._ended(lost_since)
+                if ended:
+                    return
+                continue
+            buffer = self._read_exact(length)
+            if len(buffer) < length:
+                ended, lost_since = self._ended(lost_since)
+                if ended:
+                    return
+                continue
+            lost_since = None
+            now = self.wall()
+            # This connection's timing, decided on its first frame.
+            if conn_timing is None:
+                conn_timing = "ntp" if flags & RECORD_NTP_VALID else "arrival"
+                if conn_timing == "ntp":
+                    skew = ntp_ns / 1e9 - now
+                    if abs(skew) > CLOCK_SKEW_MAX_S:
+                        self.telemetry.count("clockSkew")
+                        if not self._said_skew:
+                            self._said_skew = True
+                            print(f"decoder: {self.url} sender clock is "
+                                  f"{skew:+.1f}s from this host's; timing "
+                                  "the view by arrival", flush=True)
+                        conn_timing = "arrival"
+                if conn_timing == "arrival" and self.timing != "arrival":
+                    self.telemetry.count("arrivalTimed")
+                self.timing = conn_timing
+                conn_wall = now
+                rtp_first = rtp_prev = rtp_ts
+                rtp_pos = 0
+            elif conn_timing == "ntp" and not flags & RECORD_NTP_VALID:
+                # The sender's time went missing mid-stream (it cannot,
+                # once reported; said if it does) - the frame keeps the
+                # timeline through its RTP timestamp instead.
+                self.telemetry.count("ntpMissing")
+            # The RTP timeline, unwrapped, in seconds from this
+            # connection's first frame.
+            step = (rtp_ts - rtp_prev) & 0xFFFFFFFF
+            if step >= 0x80000000:
+                step -= 0x100000000
+            rtp_pos += step
+            rtp_prev = rtp_ts
+            if conn_timing == "ntp" and flags & RECORD_NTP_VALID:
+                at = ntp_ns / 1e9
+            else:
+                at = conn_wall + rtp_pos / RTP_CLOCK
+            if self.epoch is None:
+                self.epoch = at
+            slot = int(round((at - self.epoch) * FPS))
+            if slot < next_index:
+                self.telemetry.count("frameEarly")
+                continue
+            gap = slot - next_index
+            if gap > 0:
+                if gap <= GRID_DUP_MAX_S * FPS and last_yuv is not None:
+                    self.telemetry.count("frameDup", gap)
+                    for filled in range(next_index, slot):
+                        yield filled, filled / FPS, last_yuv
+                else:
+                    self.telemetry.count("frameGap")
+            yuv = np.frombuffer(buffer, np.uint8).reshape(
+                height * 3 // 2, width)
+            yield slot, slot / FPS, yuv
+            last_yuv = yuv
+            next_index = slot + 1
 
     def stop(self) -> None:
         if self.proc is not None:
@@ -616,6 +848,8 @@ class Session:
         # loaded here, before the link, so a missing library fails the
         # session before anything else is up.
         self.stream_at_s: float | None = None
+        # The body view's decoder, once run() has made it (views()).
+        self.decoder: Decoder | None = None
         self.audio_classifier = (acquire_audio_classifier(telemetry)
                                  if getattr(args, "audio", False) else None)
         self.audio: AudioStage | None = None
@@ -756,11 +990,23 @@ class Session:
                 print(f"descriptors failed at {item[0]['atS']}s: {error!r}",
                       flush=True)
 
+    def views(self) -> dict:
+        """How each view's frames are timed (`Decoder.timing`) and where
+        its grid starts, for /statz."""
+        out = {}
+        decoder = self.decoder
+        if decoder is not None:
+            out["body"] = {"timing": decoder.timing, "epoch": decoder.epoch,
+                           "url": decoder.url}
+        return out
+
     def run(self) -> dict:
         decoder = Decoder(
             self.args.stream, self.telemetry,
             realtime=self.args.pose == "gpu", stopping=self.stopping,
             lost_after_s=getattr(self.args, "input_lost_after", 0.0) or 0.0)
+        self.decoder = decoder
+        timing_said: str | None = None
         worker = PoseWorker(self.pose, self.assembler, self.assembler_lock,
                             self.telemetry, on_row=self.capture.pose,
                             on_pose=self._on_pose)
@@ -809,6 +1055,9 @@ class Session:
                 self.telemetry.count("framesIn")
                 if self.overlay is not None:
                     self.overlay.offer_frame(index, at_s, yuv)  # O(1): a reference
+                    if decoder.timing != timing_said:
+                        timing_said = decoder.timing
+                        self.overlay.offer_context("timing", timing_said)
                 pending[index] = gray.copy()
                 if len(pending) > PENDING_CAP:
                     pending.pop(min(pending))
@@ -1776,6 +2025,8 @@ def build_server(args, telemetry: Telemetry,
                 overlay = getattr(session, "overlay", None) if session else None
                 snapshot["overlay"] = (overlay.snapshot()
                                        if overlay is not None else None)
+                views = getattr(session, "views", None) if session else None
+                snapshot["views"] = views() if callable(views) else None
                 if tee is not None:
                     snapshot["tee"] = tee.snapshot()
                     snapshot["tee"]["idleExit"] = idle_exit.snapshot()
