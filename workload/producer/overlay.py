@@ -731,11 +731,15 @@ class OverlayRenderer(threading.Thread):
         stats = self._stats
         p50 = stats.get("poseP50")
         lines: list[tuple[str, tuple]] = []
+        # `timing` is how the decoder timed the frames (producer.Decoder):
+        # the sender's clock, or arrival here.
+        timing = context.get("timing")
         lines.append((
             f"t {frame.at_s:7.1f}s   pose {pose_rate:.1f}/s"
             + (f" p50 {p50:.0f}ms" if p50 is not None else "")
             + f" drops {stats.get('dropped', 0)}"
-            + f"   view {self.delay_s:.1f}s behind decode, aligned",
+            + f"   view {self.delay_s:.1f}s behind decode, aligned"
+            + (f"   clock {timing}" if isinstance(timing, str) and timing else ""),
             COLOR_TEXT))
         if pose.points is not None and pose.scores is not None:
             confident = int((pose.scores >= MIN_KEYPOINT_SCORE).sum())
@@ -791,6 +795,7 @@ class OverlayRenderer(threading.Thread):
     def snapshot(self) -> dict:
         with self._lock:
             stored, detections = len(self.frames), len(self.track)
+            timing = self._context.get("timing")
         return {
             "publishUrl": self.publisher.url,
             "encoder": self.publisher.encoder,
@@ -805,6 +810,7 @@ class OverlayRenderer(threading.Thread):
             "detections": detections,
             "lastState": self._last_state,
             "lastIndex": self._last_index,
+            "timing": timing if isinstance(timing, str) else None,
         }
 
 

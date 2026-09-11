@@ -464,11 +464,17 @@ class ExternalSource:
             raise SourceError("relay", "the slot's relay is not answering", 503) from None
 
     def _add_path(self, url: str, fingerprint: str) -> None:
+        # useAbsoluteTimestamp: the relay keeps the camera's own frame
+        # times (its RTCP sender reports) and gives them to its readers
+        # rather than restamping at arrival, so the producer can line this
+        # view up with the phone's (producer.Decoder, sync.py). The relay
+        # skips the packets before the camera's first report.
         code = self._api("POST", f"/v3/config/paths/add/{self.path}", {
             "source": url,
             "sourceFingerprint": fingerprint,
             "rtspTransport": "tcp",
             "sourceOnDemand": False,
+            "useAbsoluteTimestamp": True,
         })
         if code != 200:
             raise SourceError("relay", f"the relay refused the path ({code})", 503)
