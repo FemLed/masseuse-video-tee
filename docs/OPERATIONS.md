@@ -420,10 +420,16 @@ posture.
   5 (six detects a second fewer), then the face view to 6 fps
   (`--face-pose-fps 6` in `tee/entrypoint.sh`, the phone's face moves
   little), then the body to 7.5; each step is a new image roll. Measured
-  so far, `9,9,120` on the H100, two boots each: v0.5.0 (stride 3) held
-  `drops=0/0` at `stepMs=48.4/56.3`, `queueWaitMs` p95 61 ms, `busy=0.916`,
-  `stepsPerS=18.0`, over the busy line, which is what took the image to
-  stride 5.
+  so far, `9,9,120` on the H100, two cold boots each: v0.5.0 (stride 3)
+  held `drops=0/0` at `stepMs=48.4/56.3`, `queueWaitMs` p95 61 ms,
+  `busy=0.916`, `stepsPerS=18.0`, over the busy line, which is what took
+  the image to stride 5; v0.5.1 (stride 5) held `drops=0/0` at
+  `stepMs=48.2/56.2`, `queueWaitMs` p95 60.3 ms, `busy=0.895`, the SM
+  clock flat at 1980 MHz, power at most 550 W of 700, throttle `0x0`. The
+  queue-wait p95 sits on its line by construction: the bench starts both
+  views' grids aligned, so on every shared slot one step queues behind the
+  other view's whole step (56 ms with a detect) plus jitter; `9,6,120`,
+  where fewer slots coincide, measured 56.5 ms and `busy=0.765`.
 
 ## Image signing (`terraform/signing.tf`)
 
