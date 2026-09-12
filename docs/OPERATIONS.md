@@ -98,7 +98,35 @@ than 10 s from the enclave's is timed by arrival too (`clockSkew` in the
 counters); one that never reports is arrival-timed after a second
 (`arrivalTimed`). The grid counters `frameDup`, `frameEarly` and `frameGap`
 say how the frames sat on the 30 fps grid: repeats for a slow sender, drops
-for one above 30 fps, jumps across reconnects.
+for one above 30 fps, jumps across reconnects. A sender below 30 fps (a
+phone that stepped its upload down to 20, 15 or 10 fps because it could
+not keep up with the view) arrives as repeats, and the keypoint picks move
+off them: `poseRepeatDeferred` and `facePoseRepeatDeferred` count the
+picks that moved to the next distinct frame (`workload/pixel/cadence.py`,
+`FreshPicker`); `poseSubmitted` and `facePoseSubmitted` should stay near
+nine a second while they climb. A frozen picture (a paused camera) shows
+as the deferred counters stopping while the submitted ones go on: the
+cadence is kept with repeats after one slot's wait.
+
+The annotated view is published in four renditions by one encoder
+process (`--overlay-renditions hi,half,small,lean` in `tee/entrypoint.sh`;
+`workload/producer/overlay.py`, `RENDITIONS`): `hi` is the canvas at 30
+fps and 6M on the relay path `overlay`, `half` the canvas at 15 fps and 3M
+on `overlay-half`, `small` three quarters of the canvas (540x960) at 15
+fps and 1700k on `overlay-small`, `lean` the same picture at 850k on
+`overlay-lean`. Each is its own WHEP route on the slot (`/overlay-half/whep`
+and so on, the same capability, gate and evidence as `/overlay/whep`),
+and the phone moves between them by opening the next before it closes
+the one it has; eviction is per path, so the reader it is leaving lives
+until it hangs up. `GET /overlay/status` lists them under `renditions`
+(name to route) and, while a session publishes, `overlay.renditions`
+(name, size, fps, bitrate, path). Expect about 2.1 of the VM's cores for
+the four (720p30 about one, 720p15 half, the two 540p15 a third each);
+`overlayWrite` p95 on `/statz` is the pipe write into that process and
+stays under 5 ms - a climbing p95 there means the encoders are falling
+behind the renderer's tick, and `overlayPublisherRestarts` says whether
+the process died. With `--overlay-renditions hi` (the default outside the
+image) the command is what it always was.
 
 Put the digest into `terraform.tfvars` (`container_image` and
 `container_image_digest`): that is the deployment's pin, what the VM boots
