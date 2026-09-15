@@ -14,6 +14,9 @@ it. The code is `workload/producer/record.py`.
 gs://<TEE_CAPTURE_BUCKET>/<account uuid>/estim_sessions/<session uuid>/enclave/
     hello.json
     summary.json
+    runs/20260915T221554Z/hello.json
+    runs/20260915T221554Z/summary.json
+    runs/20260915T221618Z/…
     poses/part-20260915T051230Z.parquet
     faces/part-20260915T051230Z.parquet
     frames/part-20260915T051230Z.jsonl.gz
@@ -29,6 +32,18 @@ lease's `record.prefix` must match
 `^{uuid}/estim_sessions/{uuid}/enclave$` (lowercase hex) or the lease is
 refused; a slot without `TEE_CAPTURE_BUCKET` refuses any lease naming a
 record.
+
+The record is the lease's, not a production run's. A session usually has
+more than one run: the trainer opens a new `/produce` when the camera
+changes (the phone's own picture first, then a fixed camera once its
+connector is up, then again with the phone as the face inset), and each
+run is a fresh pipeline on the slot. All of them write the same streams,
+so a window has one part whichever runs fell in it, `hello.json` and
+`summary.json` are written once, and each run has its own pair under
+`runs/<start>/`, named by the UTC second it began (`-2`, `-3` should two
+begin in the same second). The record closes when the lease ends: the
+trainer's `/stop` or `/teardown`, the slot's idle exit or a lease expiry,
+a SIGTERM, or a lease for another session.
 
 ## The grid
 
@@ -103,29 +118,60 @@ One JSON object per line, `wallS` first. The rows are the messages of
 
 ## `hello.json`
 
-Written once the analysis process has answered `hello`:
+Written when the record opens, with the first run:
 
 | field | content |
 | --- | --- |
 | `sessionId`, `bucket`, `prefix`, `partSeconds`, `startedWallS` | the lease's terms and when the record opened |
 | `producer` | `imageVersion`, `imageCommit` (the release stamp of the attested image), `slot` |
+| `keypoints` | the layout above |
+| `streams` | each stream's format |
+| `runs` | where the runs' files are |
+
+## `runs/<start>/hello.json`
+
+One per production run, written once its analysis process has answered
+`hello`:
+
+| field | content |
+| --- | --- |
+| `sessionId`, `runId`, `run`, `startedWallS` | the record's session, the run's id (its start, UTC), the trainer's name for the run, and its start |
+| `producer` | the image's release stamp and the slot, as in `hello.json` |
 | `hello` | what the producer told the analysis: `fps`, `poseFps`, `facePoseFps`, `views`, `audio`, `audioModel`, `postIntervalS` |
 | `ready` | the analysis's answer: `protocol`, `version` (the bundle in `analysis.lock`), `modelVersion`, `vocal` (the constants its `vocal` rows are judged against) |
 | `sources` | which picture each view is (`poses`, `faces`, `audio`): the view's path on the enclave's own loopback relay (`rtsp://127.0.0.1:8554/…`, so a reader can tell the phone's camera from an external one) and the pose cadence; never a camera's address or link |
-| `keypoints` | the layout above |
-| `streams` | each stream's format |
+
+A run's rows are told apart in the streams by time: `startedWallS` and
+`endedWallS` of each run are in both its summary and the record's.
+
+## `runs/<start>/summary.json`
+
+The run's summary as the producer prints it (`bootMs`, `counters`,
+`gauges`, `stagesMs`, the analysis's summary, `overlay`) with `runId`,
+`startedWallS`, `endedWallS`, and `record`: the record's per-stream
+`rows`, `parts`, `late`, `dropped`, `errors` and its `upload` counts as
+they stood when the run ended (`closed: false`: the parts of the open
+window are still being written). A run that failed to start has `error`
+and no counters.
 
 ## `summary.json`
 
-The session's summary as the producer prints it (`bootMs`, `counters`,
-`gauges`, `stagesMs`, the analysis's summary, `overlay`) with `record`:
-per-stream `rows`, `parts`, `late`, `dropped`, `errors`; `files`;
-`upload` (`uploaded`, `existed`, `failed` by name, `bytes`) as they stood
-when the summary was written, before the last parts left; `endedWallS`.
-Whether every queued part then left before the close timed out is
-`drained` in the producer's own printed summary, and the slot's
-`recordPartsQueued` gauge. A record flushed by a SIGTERM has
-`ended: "flush"` instead of the session summary.
+Written when the lease ends, with `ended` saying how (`stop`, `teardown`,
+`exit` for the slot's own idle exit or a drained teardown, `lease` for
+another session's lease, `flush` for a SIGTERM, `run` when the record was
+a single run's, outside a serving slot) and `record`: per-stream `rows`,
+`parts`, `late`, `dropped`, `errors`; `files`; `runs` (`id`, `run`,
+`startedWallS`, `endedWallS` each); `upload` (`uploaded`, `existed`,
+`failed` by name, `bytes`) as they stood when the summary was written,
+before the last parts left; `startedWallS`, `endedWallS`. Whether every
+queued part then left before the close timed out is `drained` in the
+slot's log line for the close, and the slot's `recordPartsQueued` gauge.
+
+Records written before this layout (2026-09-15, image `v0.8.0`) have the
+first run's `hello` and summary in `hello.json` and `summary.json`
+themselves, no `runs/`, and where a later run of the same session fell in
+the window the first ended in, that window's part holds the first run's
+rows only.
 
 ## What is not in it
 
