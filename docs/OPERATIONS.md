@@ -527,8 +527,14 @@ process exits.
   tries), `recordErrors`; the logs `record: upload of ... failed for good`.
   `gcloud storage ls gs://masseuse-ai-prod/<uuid>/estim_sessions/<sid>/enclave/`
   from an operator identity with `objectViewer` lists a session's parts;
-  `hello.json` says which image, analysis bundle and cameras it was,
-  `summary.json` how it ended.
+  `hello.json` says which image it was, `runs/<start>/hello.json` which
+  analysis bundle and cameras each production run had, `summary.json`
+  how the lease ended and which runs it saw (docs/SESSION_RECORD.md). A
+  record is the lease's: it stays open between a session's runs (the
+  `records` list in `/statz`) and closes on `/stop`, `/teardown`, the
+  idle exit, a SIGTERM or another session's lease, logged as
+  `record: closed <prefix> (<why>): N rows in M parts, R run(s),
+  drained=…`.
 - The flat capture (`--sink-dir` files, a named run's `runs/<name>/`
   upload) is unchanged for the local loop and the equivalence gate, and
   `--tee` still forbids `--capture-bucket` and `--overlay-record`: the
