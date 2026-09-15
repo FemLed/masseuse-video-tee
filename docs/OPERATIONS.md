@@ -743,3 +743,11 @@ an organization-level Access Context Manager policy, and
 stays disabled (`vpc_sc_enabled = false`). Moving the project under an
 organization and setting `access_policy_id` turns it on; `vpc_sc_dry_run =
 true` first, to see what it would have blocked.
+
+The session record crosses the perimeter: the capture bucket lives in the
+masseuse's project. `capture_bucket_project_number` (that project's
+number) adds the egress rule for it, `google.storage.objects.create` on
+that project and nothing else, so the enclave can still add a part once
+the perimeter is enforced; left empty, an enforced perimeter would refuse
+every upload (the record survives locally in the slot's tmpfs only until
+the VM stops). Set it in the same change that turns the perimeter on.
