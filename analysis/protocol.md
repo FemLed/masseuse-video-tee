@@ -125,7 +125,12 @@ Only in a session whose `hello` listed a `face` view.
   two views are lined up.
 - `keypoints`, `dropped`, `error`, `frameSize`: as in `pose`, for the face
   view's frame. The model is the same and so are the keypoint names; the
-  body points of a face view are whatever of the body the phone sees.
+  body points of a face view are whatever of the body the phone sees. A
+  face row names the face block as well: the 238 face landmarks
+  (`workload/pixel/keypoints.py`, `FACE`, indices 70-307: midline,
+  eyebrows, eyelids, nose, lips, ears, iris, pupil) beside the 21 body
+  points, so the analysis can measure the expression; a body row names the
+  body points only.
 
 Face rows carry no descriptors: the regional motion descriptors are the
 body view's alone.
@@ -188,9 +193,11 @@ Sent only when the stream has an audio track (`workload/audio/audio_stage.py`).
 - `scores`: the CED classifier's score per label, for the labels in
   `workload/audio/ced.py` (`TARGET_LABELS`: the AudioSet classes Screaming;
   Crying, sobbing; Whimper; Wail, moan; Sigh; Groan; Grunt; Breathing; Gasp;
-  Pant; and Speech, the last so that a voice in the room can be told apart
-  from the others). Each is a probability-like number in [0, 1]. No other
-  class of the model's 527 is sent.
+  Pant; Laughter; and Speech, the last so that a voice in the room can be
+  told apart from the others). Each is a probability-like number in [0, 1].
+  No other class of the model's 527 is sent. Laughter joined the set on
+  2026-09-18 (an analysis reads it as its own kind of sound, apart from the
+  response labels); a producer from before sends the scores without it.
 - `pitch`: over the same window, the median fundamental frequency in Hz of
   the frames that had one (`null` if none did), the median periodicity
   confidence of those frames, the percentage of frames that had a pitch,

@@ -32,6 +32,7 @@ TARGET_LABELS = (
     "Breathing",
     "Gasp",
     "Pant",
+    "Laughter",
     "Speech",
 )
 
