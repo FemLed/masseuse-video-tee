@@ -253,6 +253,10 @@ session (`hello.resume`) rather than starting one. `vocal`, when present, is
 the constants the `vocal` rows below are judged against (thresholds, the
 labels' names, the bundle's vocal version): numbers and names, kept in the
 session record's `hello.json` so a row can be read back years later.
+`face`, when present (a bundle from 2026.09.18-1 on), is the same for what
+the readings carry about a `face` view: the keypoint indices and thresholds
+it is computed from, the names of its channels, and that part of the
+bundle's version. Numbers and names, kept in `hello.json` the same way.
 
 ### `post`, at the post cadence
 
