@@ -125,7 +125,12 @@ Only in a session whose `hello` listed a `face` view.
   two views are lined up.
 - `keypoints`, `dropped`, `error`, `frameSize`: as in `pose`, for the face
   view's frame. The model is the same and so are the keypoint names; the
-  body points of a face view are whatever of the body the phone sees.
+  body points of a face view are whatever of the body the phone sees. A
+  face row names the face block as well: the 238 face landmarks
+  (`workload/pixel/keypoints.py`, `FACE`, indices 70-307: midline,
+  eyebrows, eyelids, nose, lips, ears, iris, pupil) beside the 21 body
+  points, so the analysis can measure the expression; a body row names the
+  body points only.
 
 Face rows carry no descriptors: the regional motion descriptors are the
 body view's alone.
