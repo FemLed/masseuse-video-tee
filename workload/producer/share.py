@@ -85,8 +85,9 @@ def probe_connector(host: str = OWN_HOST, port: int = OWN_PORT,
     told anything about where the connection goes (it always goes to the
     connector's own endpoint)."""
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
+    context.verify_mode = ssl.CERT_NONE  # the leaf is pinned by its hash, not a chain
     try:
         with socket.create_connection((host, port), timeout=timeout_s) as raw:
             with context.wrap_socket(raw, server_hostname=None) as tls:
@@ -178,8 +179,9 @@ class TlsBridge:
 
     def _connect(self) -> ssl.SSLSocket:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
+        context.verify_mode = ssl.CERT_NONE  # the leaf is pinned below, byte for byte
         raw = socket.create_connection(self.target, timeout=self.connect_timeout_s)
         tls = context.wrap_socket(raw, server_hostname=None)
         der = tls.getpeercert(binary_form=True) or b""
