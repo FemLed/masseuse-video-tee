@@ -268,7 +268,13 @@ older bundles, then `false`) is whether this connection took up a parked
 session (`hello.resume`) rather than starting one. `vocal`, when present, is
 the constants the `vocal` rows below are judged against (thresholds, the
 labels' names, the bundle's vocal version): numbers and names, kept in the
-session record's `hello.json` so a row can be read back years later.
+session record's `hello.json` so a row can be read back years later. From
+bundle 2026.09.25-1 it also carries `head`: the version, threshold, feature
+count and type classes of the fixed classifier that judges each measured
+span from the `segment` and the trailing `audio.all` tables (`null` when
+the producer sent no `audioLabels`, and the classifier's top label decides
+as before), and `contextGroups`, the label groups the trailing background
+is read as.
 `face`, when present (a bundle from 2026.09.18-1 on), is the same for what
 the readings carry about a `face` view: the keypoint indices and thresholds
 it is computed from, the names of its channels, and that part of the
@@ -352,9 +358,13 @@ is `activation` (a classifier activation opened or closed a span),
 `decision` (a span was judged, with the scores, level, pitch and duration
 it was judged on and the verdict), `segment_error` (a `classify` it asked
 for was not answered) or `baseline` (the reference level or pitch it
-compares against changed). Everything in `row` is a number, a label name or
-a timestamp, derived from the `audio` and `segment` messages above; no
-sample is anywhere near it. The producer appends each row to the session
+compares against changed). A `decision` from bundle 2026.09.25-1 on also
+carries the head's score for the span (`headScore`), the head's version,
+the type it named (`type`, beside the classifier's `topLabel`) and its
+probability per type class (`typeProbs`); `rejected` joins the verdicts
+(the head scored the span under its threshold). Everything in `row` is a
+number, a label name or a timestamp, derived from the `audio` and
+`segment` messages above; no sample is anywhere near it. The producer appends each row to the session
 record's `vocal/` stream (`workload/producer/record.py`) and does not emit
 it on the session's event stream or send it anywhere else.
 
